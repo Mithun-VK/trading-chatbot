@@ -1,139 +1,156 @@
 const aiService = require('../services/aiService');
 const marketService = require('../services/marketService');
-const User = require('../models/User');
-const mongoose = require('mongoose');
 
-// Helper function to check if DB is connected
-const isDBConnected = () => mongoose.connection.readyState === 1;
+// In-memory chat history storage (temporary, resets on server restart)
+const chatHistoryStore = new Map();
 
 class ChatController {
+  // Helper to manage in-memory chat history
+  getChatHistory(userId, limit = 10) {
+    if (!chatHistoryStore.has(userId)) {
+      chatHistoryStore.set(userId, []);
+    }
+    const history = chatHistoryStore.get(userId);
+    return history.slice(-limit);
+  }
+
+  addToHistory(userId, message, response) {
+    if (!chatHistoryStore.has(userId)) {
+      chatHistoryStore.set(userId, []);
+    }
+    const history = chatHistoryStore.get(userId);
+    history.push({
+      role: 'user',
+      content: message,
+      timestamp: new Date()
+    });
+    history.push({
+      role: 'assistant',
+      content: response,
+      timestamp: new Date()
+    });
+    
+    // Keep only last 50 messages per user
+    if (history.length > 100) {
+      chatHistoryStore.set(userId, history.slice(-100));
+    }
+  }
+
   async sendMessage(req, res) {
     try {
-      const { userId, message, userProfile } = req.body;
+      const { userId, message } = req.body;
 
+      // Validation
       if (!userId || !message) {
         return res.status(400).json({
-          error: 'UserId and message are required'
+          success: false,
+          error: 'UserId and message are required',
+          timestamp: new Date().toISOString()
         });
       }
 
-      let user = null;
-      let userPreferences = {};
-      let chatHistory = [];
-
-      // Only query database if connected
-      if (isDBConnected()) {
-        try {
-          // Get or create user
-          user = await User.findOne({ userId });
-          if (!user && userProfile) {
-            user = new User({
-              userId,
-              name: userProfile.name || 'Anonymous',
-              email: userProfile.email || `${userId}@temp.com`,
-              preferences: userProfile.preferences || {}
-            });
-            await user.save();
-          }
-
-          if (user) {
-            userPreferences = user.preferences || {};
-            chatHistory = user.chatHistory?.slice(-5) || [];
-          }
-        } catch (dbError) {
-          console.error('⚠️ Database query error:', dbError.message);
-          // Continue without user data
-        }
-      } else {
-        console.log('⚠️ Database not connected - using in-memory mode');
+      if (typeof message !== 'string' || message.trim().length === 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'Message must be a non-empty string',
+          timestamp: new Date().toISOString()
+        });
       }
+
+      if (message.length > 5000) {
+        return res.status(400).json({
+          success: false,
+          error: 'Message too long (max 5000 characters)',
+          timestamp: new Date().toISOString()
+        });
+      }
+
+      console.log(`📨 Chat request from user: ${userId}`);
+      console.log(`💬 Message: ${message.substring(0, 100)}${message.length > 100 ? '...' : ''}`);
+
+      // Get conversation history for context
+      const chatHistory = this.getChatHistory(userId, 5);
 
       // Get market context if message relates to trading
       let marketContext = null;
       try {
         marketContext = await marketService.getRelevantMarketData(message);
+        if (marketContext) {
+          console.log(`📊 Market context retrieved for symbols:`, marketContext.symbols);
+        }
       } catch (error) {
-        console.error('Market service error:', error.message);
+        console.error('⚠️ Market service error:', error.message);
         // Continue without market context
       }
       
       // Generate AI response
+      const startTime = Date.now();
       const aiResponse = await aiService.generateResponse(message, {
         userId,
-        userPreferences,
         marketContext,
         chatHistory
       });
+      const responseTime = Date.now() - startTime;
 
-      // Save to chat history only if DB connected
-      if (isDBConnected() && user) {
-        try {
-          user.chatHistory.push({
-            message,
-            response: aiResponse.text,
-            messageType: aiResponse.type || 'text'
-          });
-          
-          // Keep only last 50 messages
-          if (user.chatHistory.length > 50) {
-            user.chatHistory = user.chatHistory.slice(-50);
-          }
-          
-          await user.save();
-        } catch (dbError) {
-          console.error('⚠️ Database save error:', dbError.message);
-          // Continue - don't fail the request
-        }
-      }
+      console.log(`✅ AI response generated in ${responseTime}ms`);
+
+      // Save to in-memory history
+      this.addToHistory(userId, message, aiResponse.text);
 
       res.json({
+        success: true,
         response: aiResponse.text,
         type: aiResponse.type || 'text',
         suggestions: aiResponse.suggestions || [],
         marketData: aiResponse.marketData || null,
-        timestamp: new Date().toISOString(),
-        databaseConnected: isDBConnected()
+        metadata: {
+          responseTime: `${responseTime}ms`,
+          hasMarketContext: !!marketContext,
+          historyLength: chatHistory.length,
+          timestamp: new Date().toISOString()
+        }
       });
 
     } catch (error) {
-      console.error('Chat error:', error);
+      console.error('❌ Chat error:', error);
       res.status(500).json({
+        success: false,
         error: 'Failed to process message',
-        details: process.env.NODE_ENV === 'development' ? error.message : undefined
+        message: 'An error occurred while processing your request. Please try again.',
+        details: process.env.NODE_ENV === 'development' ? error.message : undefined,
+        timestamp: new Date().toISOString()
       });
     }
   }
 
-  async getChatHistory(req, res) {
+  async getChatHistoryEndpoint(req, res) {
     try {
       const { userId } = req.params;
-      const { limit = 20, offset = 0 } = req.query;
+      const { limit = 20 } = req.query;
 
-      if (!isDBConnected()) {
-        return res.status(503).json({ 
-          error: 'Database not available',
-          message: 'Chat history requires database connection'
+      if (!userId) {
+        return res.status(400).json({
+          success: false,
+          error: 'UserId is required'
         });
       }
 
-      const user = await User.findOne({ userId });
-      
-      if (!user) {
-        return res.json({ chatHistory: [] });
-      }
-
-      const history = user.chatHistory
-        .slice(-limit - offset, -offset || undefined)
-        .reverse();
+      const history = this.getChatHistory(userId, parseInt(limit));
 
       res.json({
+        success: true,
         chatHistory: history,
-        total: user.chatHistory.length
+        total: history.length,
+        note: 'History is stored in-memory and will reset on server restart',
+        timestamp: new Date().toISOString()
       });
 
     } catch (error) {
       console.error('Get chat history error:', error);
-      res.status(500).json({ error: 'Failed to retrieve chat history' });
+      res.status(500).json({
+        success: false,
+        error: 'Failed to retrieve chat history'
+      });
     }
   }
 
@@ -141,291 +158,132 @@ class ChatController {
     try {
       const { userId } = req.params;
 
-      if (!isDBConnected()) {
-        return res.status(503).json({ 
-          error: 'Database not available'
+      if (!userId) {
+        return res.status(400).json({
+          success: false,
+          error: 'UserId is required'
         });
       }
 
-      await User.updateOne(
-        { userId },
-        { $set: { chatHistory: [] } }
-      );
+      chatHistoryStore.delete(userId);
 
-      res.json({ message: 'Chat history cleared successfully' });
+      res.json({
+        success: true,
+        message: 'Chat history cleared successfully',
+        timestamp: new Date().toISOString()
+      });
 
     } catch (error) {
       console.error('Clear chat history error:', error);
-      res.status(500).json({ error: 'Failed to clear chat history' });
+      res.status(500).json({
+        success: false,
+        error: 'Failed to clear chat history'
+      });
     }
   }
 
   async getMarketData(req, res) {
     try {
       const { symbol } = req.params;
-      const marketData = await marketService.getStockData(symbol);
 
-      res.json(marketData);
+      if (!symbol) {
+        return res.status(400).json({
+          success: false,
+          error: 'Stock symbol is required'
+        });
+      }
+
+      console.log(`📈 Fetching market data for: ${symbol.toUpperCase()}`);
+
+      const marketData = await marketService.getStockData(symbol.toUpperCase());
+
+      res.json({
+        success: true,
+        data: marketData,
+        symbol: symbol.toUpperCase(),
+        timestamp: new Date().toISOString()
+      });
 
     } catch (error) {
       console.error('Market data error:', error);
-      res.status(500).json({ error: 'Failed to retrieve market data' });
+      res.status(500).json({
+        success: false,
+        error: 'Failed to retrieve market data',
+        message: `Could not fetch data for symbol: ${symbol}`,
+        timestamp: new Date().toISOString()
+      });
     }
   }
 
   async addToWatchlist(req, res) {
-    try {
-      const { userId, symbol, alertPrice, alertType } = req.body;
-
-      if (!isDBConnected()) {
-        return res.status(503).json({ 
-          error: 'Database not available',
-          message: 'Watchlist features require database connection'
-        });
-      }
-
-      const user = await User.findOne({ userId });
-      if (!user) {
-        return res.status(404).json({ error: 'User not found' });
-      }
-
-      // Check if already in watchlist
-      const existingIndex = user.watchlist.findIndex(item => item.symbol === symbol.toUpperCase());
-      
-      if (existingIndex >= 0) {
-        // Update existing
-        user.watchlist[existingIndex] = {
-          symbol: symbol.toUpperCase(),
-          alertPrice,
-          alertType,
-          addedAt: new Date()
-        };
-      } else {
-        // Add new
-        user.watchlist.push({
-          symbol: symbol.toUpperCase(),
-          alertPrice,
-          alertType
-        });
-      }
-
-      await user.save();
-
-      res.json({
-        message: 'Added to watchlist successfully',
-        watchlist: user.watchlist
-      });
-
-    } catch (error) {
-      console.error('Add to watchlist error:', error);
-      res.status(500).json({ error: 'Failed to add to watchlist' });
-    }
+    res.status(501).json({
+      success: false,
+      error: 'Feature not available',
+      message: 'Watchlist requires database. This feature will be available in a future update.',
+      timestamp: new Date().toISOString()
+    });
   }
 
   async getWatchlist(req, res) {
-    try {
-      const { userId } = req.params;
-
-      if (!isDBConnected()) {
-        return res.status(503).json({ 
-          error: 'Database not available',
-          message: 'Watchlist features require database connection'
-        });
-      }
-
-      const user = await User.findOne({ userId });
-      if (!user) {
-        return res.json({ watchlist: [] });
-      }
-
-      // Get current prices for watchlist items
-      const watchlistWithPrices = await Promise.all(
-        user.watchlist.map(async (item) => {
-          try {
-            const marketData = await marketService.getStockData(item.symbol);
-            return {
-              ...item.toObject(),
-              currentPrice: marketData.price,
-              change: marketData.change,
-              changePercent: marketData.changePercent
-            };
-          } catch (error) {
-            return {
-              ...item.toObject(),
-              currentPrice: null,
-              error: 'Failed to fetch price'
-            };
-          }
-        })
-      );
-
-      res.json({ watchlist: watchlistWithPrices });
-
-    } catch (error) {
-      console.error('Get watchlist error:', error);
-      res.status(500).json({ error: 'Failed to retrieve watchlist' });
-    }
+    res.status(501).json({
+      success: false,
+      error: 'Feature not available',
+      message: 'Watchlist requires database. This feature will be available in a future update.',
+      watchlist: [],
+      timestamp: new Date().toISOString()
+    });
   }
 
   async removeFromWatchlist(req, res) {
-    try {
-      const { userId, symbol } = req.params;
-
-      if (!isDBConnected()) {
-        return res.status(503).json({ 
-          error: 'Database not available'
-        });
-      }
-
-      const user = await User.findOne({ userId });
-      if (!user) {
-        return res.status(404).json({ error: 'User not found' });
-      }
-
-      user.watchlist = user.watchlist.filter(item => item.symbol !== symbol.toUpperCase());
-      await user.save();
-
-      res.json({
-        message: 'Removed from watchlist successfully',
-        watchlist: user.watchlist
-      });
-
-    } catch (error) {
-      console.error('Remove from watchlist error:', error);
-      res.status(500).json({ error: 'Failed to remove from watchlist' });
-    }
+    res.status(501).json({
+      success: false,
+      error: 'Feature not available',
+      message: 'Watchlist requires database. This feature will be available in a future update.',
+      timestamp: new Date().toISOString()
+    });
   }
 
   async getPortfolio(req, res) {
-    try {
-      const { userId } = req.params;
-
-      if (!isDBConnected()) {
-        return res.status(503).json({ 
-          error: 'Database not available',
-          message: 'Portfolio features require database connection'
-        });
-      }
-
-      const user = await User.findOne({ userId });
-      if (!user) {
-        return res.json({ portfolio: [], totalValue: 0, totalGainLoss: 0 });
-      }
-
-      // Update current prices
-      const portfolioWithCurrentPrices = await Promise.all(
-        user.portfolio.map(async (holding) => {
-          try {
-            const marketData = await marketService.getStockData(holding.symbol);
-            holding.currentPrice = marketData.price;
-            holding.lastUpdated = new Date();
-            return holding;
-          } catch (error) {
-            return holding;
-          }
-        })
-      );
-
-      user.portfolio = portfolioWithCurrentPrices;
-      await user.save();
-
-      const totalValue = user.portfolioValue;
-      const totalGainLoss = user.totalGainLoss;
-
-      res.json({
-        portfolio: user.portfolio,
-        totalValue,
-        totalGainLoss,
-        gainLossPercent: totalValue > 0 ? (totalGainLoss / (totalValue - totalGainLoss)) * 100 : 0
-      });
-
-    } catch (error) {
-      console.error('Get portfolio error:', error);
-      res.status(500).json({ error: 'Failed to retrieve portfolio' });
-    }
+    res.status(501).json({
+      success: false,
+      error: 'Feature not available',
+      message: 'Portfolio tracking requires database. This feature will be available in a future update.',
+      portfolio: [],
+      totalValue: 0,
+      totalGainLoss: 0,
+      timestamp: new Date().toISOString()
+    });
   }
 
   async updatePortfolio(req, res) {
-    try {
-      const { userId, symbol, quantity, averagePrice, action } = req.body;
-
-      if (!isDBConnected()) {
-        return res.status(503).json({ 
-          error: 'Database not available',
-          message: 'Portfolio features require database connection'
-        });
-      }
-
-      const user = await User.findOne({ userId });
-      if (!user) {
-        return res.status(404).json({ error: 'User not found' });
-      }
-
-      const existingIndex = user.portfolio.findIndex(item => item.symbol === symbol.toUpperCase());
-
-      if (action === 'buy') {
-        if (existingIndex >= 0) {
-          // Update existing holding
-          const existing = user.portfolio[existingIndex];
-          const totalQuantity = existing.quantity + quantity;
-          const totalCost = (existing.quantity * existing.averagePrice) + (quantity * averagePrice);
-          
-          user.portfolio[existingIndex] = {
-            symbol: symbol.toUpperCase(),
-            quantity: totalQuantity,
-            averagePrice: totalCost / totalQuantity,
-            currentPrice: existing.currentPrice,
-            lastUpdated: new Date()
-          };
-        } else {
-          // Add new holding
-          user.portfolio.push({
-            symbol: symbol.toUpperCase(),
-            quantity,
-            averagePrice,
-            currentPrice: averagePrice
-          });
-        }
-      } else if (action === 'sell') {
-        if (existingIndex >= 0) {
-          const existing = user.portfolio[existingIndex];
-          if (existing.quantity >= quantity) {
-            existing.quantity -= quantity;
-            existing.lastUpdated = new Date();
-            
-            if (existing.quantity === 0) {
-              user.portfolio.splice(existingIndex, 1);
-            }
-          } else {
-            return res.status(400).json({ error: 'Insufficient quantity to sell' });
-          }
-        } else {
-          return res.status(400).json({ error: 'Stock not found in portfolio' });
-        }
-      }
-
-      await user.save();
-
-      res.json({
-        message: `Portfolio updated successfully (${action})`,
-        portfolio: user.portfolio
-      });
-
-    } catch (error) {
-      console.error('Update portfolio error:', error);
-      res.status(500).json({ error: 'Failed to update portfolio' });
-    }
+    res.status(501).json({
+      success: false,
+      error: 'Feature not available',
+      message: 'Portfolio tracking requires database. This feature will be available in a future update.',
+      timestamp: new Date().toISOString()
+    });
   }
 
   async getAnalysis(req, res) {
     try {
       const { symbol, analysisType = 'technical' } = req.body;
 
-      const marketData = await marketService.getDetailedStockData(symbol);
-      const analysis = await aiService.generateAnalysis(symbol, marketData, analysisType);
+      if (!symbol) {
+        return res.status(400).json({
+          success: false,
+          error: 'Stock symbol is required',
+          timestamp: new Date().toISOString()
+        });
+      }
+
+      console.log(`🔍 Generating ${analysisType} analysis for: ${symbol.toUpperCase()}`);
+
+      const marketData = await marketService.getDetailedStockData(symbol.toUpperCase());
+      const analysis = await aiService.generateAnalysis(symbol.toUpperCase(), marketData, analysisType);
 
       res.json({
-        symbol,
+        success: true,
+        symbol: symbol.toUpperCase(),
         analysisType,
         analysis: analysis.text,
         recommendation: analysis.recommendation,
@@ -436,40 +294,61 @@ class ChatController {
 
     } catch (error) {
       console.error('Analysis error:', error);
-      res.status(500).json({ error: 'Failed to generate analysis' });
+      res.status(500).json({
+        success: false,
+        error: 'Failed to generate analysis',
+        message: `Could not analyze symbol: ${req.body.symbol}`,
+        timestamp: new Date().toISOString()
+      });
     }
   }
 
   async getRecommendations(req, res) {
     try {
-      const { userId } = req.params;
       const { category = 'general' } = req.query;
 
-      let user = null;
-      
-      if (isDBConnected()) {
-        try {
-          user = await User.findOne({ userId });
-        } catch (dbError) {
-          console.error('⚠️ Database query error:', dbError.message);
-          // Continue without user data
-        }
-      }
+      console.log(`💡 Generating ${category} recommendations`);
 
-      const recommendations = await aiService.generateRecommendations(user, category);
+      const recommendations = await aiService.generateRecommendations(null, category);
 
       res.json({
+        success: true,
         recommendations: recommendations.items || [],
         category,
-        basedOn: recommendations.basedOn || 'general market analysis',
-        timestamp: new Date().toISOString(),
-        personalized: !!user
+        basedOn: 'general market analysis',
+        personalized: false,
+        note: 'Personalized recommendations require database integration',
+        timestamp: new Date().toISOString()
       });
 
     } catch (error) {
       console.error('Recommendations error:', error);
-      res.status(500).json({ error: 'Failed to generate recommendations' });
+      res.status(500).json({
+        success: false,
+        error: 'Failed to generate recommendations',
+        timestamp: new Date().toISOString()
+      });
     }
+  }
+
+  // Health check endpoint for chat service
+  async healthCheck(req, res) {
+    res.json({
+      success: true,
+      service: 'Chat Controller',
+      status: 'operational',
+      features: {
+        chat: 'available',
+        marketData: 'available',
+        analysis: 'available',
+        recommendations: 'available',
+        history: 'in-memory only',
+        watchlist: 'not available',
+        portfolio: 'not available'
+      },
+      inMemoryUsers: chatHistoryStore.size,
+      timestamp: new Date().toISOString()
+    });
   }
 }
 
