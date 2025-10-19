@@ -1,6 +1,10 @@
 const aiService = require('../services/aiService');
 const marketService = require('../services/marketService');
 const User = require('../models/User');
+const mongoose = require('mongoose');
+
+// Helper function to check if DB is connected
+const isDBConnected = () => mongoose.connection.readyState === 1;
 
 class ChatController {
   async sendMessage(req, res) {
@@ -13,43 +17,73 @@ class ChatController {
         });
       }
 
-      // Get or create user
-      let user = await User.findOne({ userId });
-      if (!user && userProfile) {
-        user = new User({
-          userId,
-          name: userProfile.name || 'Anonymous',
-          email: userProfile.email || `${userId}@temp.com`,
-          preferences: userProfile.preferences || {}
-        });
-        await user.save();
+      let user = null;
+      let userPreferences = {};
+      let chatHistory = [];
+
+      // Only query database if connected
+      if (isDBConnected()) {
+        try {
+          // Get or create user
+          user = await User.findOne({ userId });
+          if (!user && userProfile) {
+            user = new User({
+              userId,
+              name: userProfile.name || 'Anonymous',
+              email: userProfile.email || `${userId}@temp.com`,
+              preferences: userProfile.preferences || {}
+            });
+            await user.save();
+          }
+
+          if (user) {
+            userPreferences = user.preferences || {};
+            chatHistory = user.chatHistory?.slice(-5) || [];
+          }
+        } catch (dbError) {
+          console.error('⚠️ Database query error:', dbError.message);
+          // Continue without user data
+        }
+      } else {
+        console.log('⚠️ Database not connected - using in-memory mode');
       }
 
       // Get market context if message relates to trading
-      const marketContext = await marketService.getRelevantMarketData(message);
+      let marketContext = null;
+      try {
+        marketContext = await marketService.getRelevantMarketData(message);
+      } catch (error) {
+        console.error('Market service error:', error.message);
+        // Continue without market context
+      }
       
       // Generate AI response
       const aiResponse = await aiService.generateResponse(message, {
         userId,
-        userPreferences: user?.preferences,
+        userPreferences,
         marketContext,
-        chatHistory: user?.chatHistory?.slice(-5) || [] // Last 5 messages for context
+        chatHistory
       });
 
-      // Save to chat history
-      if (user) {
-        user.chatHistory.push({
-          message,
-          response: aiResponse.text,
-          messageType: aiResponse.type || 'text'
-        });
-        
-        // Keep only last 50 messages
-        if (user.chatHistory.length > 50) {
-          user.chatHistory = user.chatHistory.slice(-50);
+      // Save to chat history only if DB connected
+      if (isDBConnected() && user) {
+        try {
+          user.chatHistory.push({
+            message,
+            response: aiResponse.text,
+            messageType: aiResponse.type || 'text'
+          });
+          
+          // Keep only last 50 messages
+          if (user.chatHistory.length > 50) {
+            user.chatHistory = user.chatHistory.slice(-50);
+          }
+          
+          await user.save();
+        } catch (dbError) {
+          console.error('⚠️ Database save error:', dbError.message);
+          // Continue - don't fail the request
         }
-        
-        await user.save();
       }
 
       res.json({
@@ -57,7 +91,8 @@ class ChatController {
         type: aiResponse.type || 'text',
         suggestions: aiResponse.suggestions || [],
         marketData: aiResponse.marketData || null,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        databaseConnected: isDBConnected()
       });
 
     } catch (error) {
@@ -73,6 +108,13 @@ class ChatController {
     try {
       const { userId } = req.params;
       const { limit = 20, offset = 0 } = req.query;
+
+      if (!isDBConnected()) {
+        return res.status(503).json({ 
+          error: 'Database not available',
+          message: 'Chat history requires database connection'
+        });
+      }
 
       const user = await User.findOne({ userId });
       
@@ -98,6 +140,12 @@ class ChatController {
   async clearChatHistory(req, res) {
     try {
       const { userId } = req.params;
+
+      if (!isDBConnected()) {
+        return res.status(503).json({ 
+          error: 'Database not available'
+        });
+      }
 
       await User.updateOne(
         { userId },
@@ -128,6 +176,13 @@ class ChatController {
   async addToWatchlist(req, res) {
     try {
       const { userId, symbol, alertPrice, alertType } = req.body;
+
+      if (!isDBConnected()) {
+        return res.status(503).json({ 
+          error: 'Database not available',
+          message: 'Watchlist features require database connection'
+        });
+      }
 
       const user = await User.findOne({ userId });
       if (!user) {
@@ -171,6 +226,13 @@ class ChatController {
     try {
       const { userId } = req.params;
 
+      if (!isDBConnected()) {
+        return res.status(503).json({ 
+          error: 'Database not available',
+          message: 'Watchlist features require database connection'
+        });
+      }
+
       const user = await User.findOne({ userId });
       if (!user) {
         return res.json({ watchlist: [] });
@@ -209,6 +271,12 @@ class ChatController {
     try {
       const { userId, symbol } = req.params;
 
+      if (!isDBConnected()) {
+        return res.status(503).json({ 
+          error: 'Database not available'
+        });
+      }
+
       const user = await User.findOne({ userId });
       if (!user) {
         return res.status(404).json({ error: 'User not found' });
@@ -231,6 +299,13 @@ class ChatController {
   async getPortfolio(req, res) {
     try {
       const { userId } = req.params;
+
+      if (!isDBConnected()) {
+        return res.status(503).json({ 
+          error: 'Database not available',
+          message: 'Portfolio features require database connection'
+        });
+      }
 
       const user = await User.findOne({ userId });
       if (!user) {
@@ -273,6 +348,13 @@ class ChatController {
   async updatePortfolio(req, res) {
     try {
       const { userId, symbol, quantity, averagePrice, action } = req.body;
+
+      if (!isDBConnected()) {
+        return res.status(503).json({ 
+          error: 'Database not available',
+          message: 'Portfolio features require database connection'
+        });
+      }
 
       const user = await User.findOne({ userId });
       if (!user) {
@@ -363,14 +445,25 @@ class ChatController {
       const { userId } = req.params;
       const { category = 'general' } = req.query;
 
-      const user = await User.findOne({ userId });
+      let user = null;
+      
+      if (isDBConnected()) {
+        try {
+          user = await User.findOne({ userId });
+        } catch (dbError) {
+          console.error('⚠️ Database query error:', dbError.message);
+          // Continue without user data
+        }
+      }
+
       const recommendations = await aiService.generateRecommendations(user, category);
 
       res.json({
         recommendations: recommendations.items || [],
         category,
         basedOn: recommendations.basedOn || 'general market analysis',
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        personalized: !!user
       });
 
     } catch (error) {
