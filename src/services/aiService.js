@@ -8,7 +8,7 @@ class AIService {
         
         // Use the latest stable model
         this.model = this.genAI.getGenerativeModel({ 
-          model: 'gemini-2.0-flash', // Latest stable model
+          model: 'gemini-2.0-flash',
           generationConfig: {
             temperature: 0.7,
             topK: 40,
@@ -69,22 +69,54 @@ class AIService {
   }
 
   async generateGeminiResponse(message, context) {
-    const prompt = this.buildPrompt(message, context);
-    
-    const result = await this.model.generateContent(prompt);
-    const response = result.response;
-    const text = response.text();
+    try {
+      const prompt = this.buildPrompt(message, context);
+      
+      const result = await this.model.generateContent(prompt);
+      const response = result.response;
+      
+      // Safer text extraction with multiple fallbacks
+      let text = '';
+      try {
+        text = response.text();
+      } catch (textError) {
+        // Fallback to alternative extraction methods
+        console.error('Error extracting text:', textError.message);
+        
+        // Try alternative methods
+        if (response.candidates && response.candidates.length > 0) {
+          const candidate = response.candidates[0];
+          if (candidate.content && candidate.content.parts && candidate.content.parts.length > 0) {
+            text = candidate.content.parts[0].text || '';
+          }
+        }
+        
+        // If still no text, throw error to trigger fallback
+        if (!text) {
+          throw new Error('Unable to extract text from response');
+        }
+      }
 
-    // Parse suggestions from Gemini response if present
-    const suggestions = this.extractSuggestionsFromText(text);
+      // Validate text is string and not empty
+      if (!text || typeof text !== 'string' || text.trim().length === 0) {
+        throw new Error('Invalid or empty response text');
+      }
 
-    return {
-      text: text,
-      type: this.determineMessageType(message),
-      suggestions: suggestions.length > 0 ? suggestions : this.getDefaultSuggestions(message),
-      marketData: context.marketContext || null,
-      source: 'gemini'
-    };
+      // Parse suggestions from Gemini response if present
+      const suggestions = this.extractSuggestionsFromText(text);
+
+      return {
+        text: text,
+        type: this.determineMessageType(message),
+        suggestions: suggestions.length > 0 ? suggestions : this.getDefaultSuggestions(message),
+        marketData: context.marketContext || null,
+        source: 'gemini'
+      };
+      
+    } catch (error) {
+      console.error('Gemini response error:', error.message);
+      throw error; // Re-throw to trigger fallback in parent function
+    }
   }
 
   buildPrompt(message, context) {
@@ -101,20 +133,25 @@ class AIService {
       prompt += `\n`;
     }
 
-    // Add conversation history for context
-    if (context.chatHistory && context.chatHistory.length > 0) {
+    // Add conversation history for context (with safety checks)
+    if (context.chatHistory && Array.isArray(context.chatHistory) && context.chatHistory.length > 0) {
       prompt += `**Recent Conversation:**\n`;
-      context.chatHistory.slice(-3).forEach((msg, i) => {
-        prompt += `User: ${msg.message}\nAssistant: ${msg.response.substring(0, 100)}...\n\n`;
+      context.chatHistory.slice(-3).forEach((msg) => {
+        if (msg && msg.content && typeof msg.content === 'string') {
+          const content = msg.content.substring(0, 100);
+          prompt += `${msg.role}: ${content}${msg.content.length > 100 ? '...' : ''}\n`;
+        }
       });
+      prompt += `\n`;
     }
 
     // Add market context if available
-    if (context.marketContext) {
+    if (context.marketContext && context.marketContext.relevantData && Array.isArray(context.marketContext.relevantData)) {
       prompt += `**Current Market Data:**\n`;
-      prompt += `Symbol: ${context.marketContext.symbol}\n`;
-      prompt += `Price: $${context.marketContext.price}\n`;
-      prompt += `Change: ${context.marketContext.change} (${context.marketContext.changePercent}%)\n\n`;
+      context.marketContext.relevantData.forEach(stock => {
+        prompt += `${stock.symbol}: $${stock.price} (${stock.changePercent > 0 ? '+' : ''}${stock.changePercent}%)\n`;
+      });
+      prompt += `\n`;
     }
 
     // Add the user's question
@@ -135,33 +172,42 @@ class AIService {
   }
 
   extractSuggestionsFromText(text) {
-    // Try to extract suggestions from Gemini response
+    // Safety check for valid input
+    if (!text || typeof text !== 'string') {
+      return [];
+    }
+
     const suggestions = [];
-    const lines = text.split('\n');
     
-    lines.forEach(line => {
-      if (line.match(/^\d+\.\s+[A-Z]/) || line.includes('Would you like to') || line.includes('Try:')) {
-        const cleaned = line.replace(/^\d+\.\s+/, '').replace(/[?:]$/,'').trim();
-        if (cleaned.length > 0 && cleaned.length < 50) {
-          suggestions.push(cleaned);
+    try {
+      const lines = text.split('\n');
+      
+      lines.forEach(line => {
+        if (line.match(/^\d+\.\s+[A-Z]/) || line.includes('Would you like to') || line.includes('Try:')) {
+          const cleaned = line.replace(/^\d+\.\s+/, '').replace(/[?:]$/,'').trim();
+          if (cleaned.length > 0 && cleaned.length < 50) {
+            suggestions.push(cleaned);
+          }
         }
-      }
-    });
+      });
+    } catch (error) {
+      console.error('Error extracting suggestions:', error.message);
+    }
 
     return suggestions.slice(0, 3);
   }
 
   getDefaultSuggestions(message) {
-    const lower = message.toLowerCase();
+    const lower = (message || '').toLowerCase();
     
     if (lower.includes('market') || lower.includes('summary')) {
-      return ['Analyze top stocks', 'Show sector performance', 'View my portfolio'];
+      return ['Analyze top stocks', 'Show sector performance', 'Market trends'];
     } else if (lower.includes('portfolio')) {
       return ['Show all holdings', 'Add new stock', 'Get recommendations'];
     } else if (lower.includes('stock') || /[A-Z]{2,5}/.test(message)) {
       return ['Add to watchlist', 'Set price alert', 'Compare with peers'];
     } else {
-      return ['Market summary', 'Analyze a stock', 'View portfolio'];
+      return ['Market summary', 'Analyze a stock', 'Trading tips'];
     }
   }
 
@@ -170,28 +216,28 @@ class AIService {
     
     const responses = {
       market: {
-        text: `📊 **Market Summary** (Mock Data)\n\nToday's market highlights:\n\n• **S&P 500:** +1.24% (5,847) 🟢\n• **Nasdaq:** +1.82% (18,352) 🟢\n• **Dow Jones:** +0.95% (42,863) 🟢\n\n**Top Movers:**\n🟢 Tech sector leading (+2.1%)\n🟢 AI stocks surging\n🔴 Energy sector down (-0.8%)\n\n*Note: This is demo data. Add GEMINI_API_KEY for real analysis.*`,
+        text: `📊 **Market Summary** (Demo Mode)\n\n**Today's Performance:**\n\n• S&P 500: +1.24% (5,847) 🟢\n• Nasdaq: +1.82% (18,352) 🟢\n• Dow Jones: +0.95% (42,863) 🟢\n\n**Sector Highlights:**\n🟢 Tech sector leading (+2.1%)\n🟢 AI stocks surging\n🔴 Energy sector down (-0.8%)\n\n💡 *Add GEMINI_API_KEY for real-time AI analysis*`,
         type: 'market_data',
-        suggestions: ['Analyze tech stocks', 'Show my portfolio', 'Get recommendations']
+        suggestions: ['Analyze tech stocks', 'Show top gainers', 'Market news']
       },
       stock: {
-        text: `📈 **${this.extractSymbol(message) || 'Stock'} Analysis** (Mock)\n\n**Current Status:**\n• Price: Strong uptrend ✅\n• Volume: Above average 📊\n• Momentum: Bullish 🚀\n• Rating: 4.3/5 ⭐\n\n**Recommendation:** Suitable for your moderate risk profile.\n\n*Add GEMINI_API_KEY for AI-powered analysis.*`,
+        text: `📈 **${this.extractSymbol(message) || 'Stock'} Analysis** (Demo)\n\n**Quick Overview:**\n• Trend: Strong uptrend ✅\n• Volume: Above average 📊\n• Momentum: Bullish 🚀\n• Rating: 4.3/5 ⭐\n\n**Recommendation:** Suitable for moderate risk investors.\n\n💡 *Connect Gemini AI for detailed analysis*`,
         type: 'analysis',
-        suggestions: ['Add to watchlist', 'Set price alert', 'Compare stocks']
+        suggestions: ['Set price alert', 'View competitors', 'Technical analysis']
       },
       portfolio: {
-        text: `💼 **Portfolio Performance** (Mock)\n\n**Overall:** +5.4% (Last 30 days)\n\n**Top Holdings:**\n🟢 AAPL: +12.3%\n🟢 MSFT: +8.7%\n🔴 TSLA: -2.1%\n\n**Allocation:** Tech 60% | Healthcare 25% | Finance 15%\n\n*Connect Gemini for personalized insights.*`,
+        text: `💼 **Portfolio Summary** (Demo)\n\n**Performance:** +5.4% (30 days)\n\n**Top Holdings:**\n🟢 AAPL: +12.3%\n🟢 MSFT: +8.7%\n🔴 TSLA: -2.1%\n\n**Allocation:**\nTech 60% | Healthcare 25% | Finance 15%\n\n💡 *Gemini AI provides personalized insights*`,
         type: 'analysis',
-        suggestions: ['View all holdings', 'Rebalance portfolio', 'Add stock']
+        suggestions: ['Rebalance portfolio', 'Add investment', 'Risk analysis']
       },
       default: {
-        text: `👋 **Trading Assistant** (Demo Mode)\n\nI can help with:\n\n📊 Stock analysis & recommendations\n💰 Portfolio tracking\n📈 Market trends & news\n🎯 Price alerts & watchlist\n\n*Add your GEMINI_API_KEY to unlock AI-powered insights!*\n\nWhat would you like to explore?`,
+        text: `👋 **AI Trading Assistant** (Demo Mode)\n\n**I can help you with:**\n\n📊 Real-time stock analysis\n💹 Market trends & insights\n📈 Portfolio recommendations\n🎯 Trading strategies\n💰 Risk assessment\n\n💡 *Add GEMINI_API_KEY for AI-powered insights!*\n\nWhat would you like to explore?`,
         type: 'text',
-        suggestions: ['Market summary', 'Analyze AAPL', 'Check portfolio']
+        suggestions: ['Market overview', 'Analyze AAPL', 'Trading tips']
       }
     };
 
-    const lower = message.toLowerCase();
+    const lower = (message || '').toLowerCase();
     let response;
 
     if (lower.includes('market') || lower.includes('summary')) {
@@ -245,7 +291,7 @@ class AIService {
 
     // Mock fallback
     return {
-      text: `**${analysisType.toUpperCase()} Analysis for ${symbol}**\n\n📊 Price: $${marketData?.price}\n📈 Trend: Bullish\n💪 Strength: Strong (RSI: 62)\n🎯 Target: $${(marketData?.price * 1.12).toFixed(2)}\n⚠️ Stop Loss: $${(marketData?.price * 0.94).toFixed(2)}\n\n**Key Factors:**\n• Volume increasing\n• Breaking resistance\n• Strong momentum\n\n**Verdict:** Strong BUY signal.`,
+      text: `**${analysisType.toUpperCase()} Analysis for ${symbol}**\n\n📊 Current: $${marketData?.price}\n📈 Trend: Bullish\n💪 Strength: Strong (RSI: 62)\n🎯 Target: $${(marketData?.price * 1.12).toFixed(2)}\n⚠️ Stop: $${(marketData?.price * 0.94).toFixed(2)}\n\n**Key Factors:**\n• Volume increasing\n• Breaking resistance\n• Strong momentum\n\n**Verdict:** Strong BUY signal.`,
       recommendation: 'BUY',
       confidence: 0.75,
       keyPoints: [
@@ -259,7 +305,6 @@ class AIService {
   }
 
   async generateRecommendations(user, category) {
-    // You can add Gemini-powered recommendations here later
     const recommendations = {
       general: [
         { symbol: 'AAPL', reason: 'Market leader with strong fundamentals', confidence: 0.85 },
@@ -280,7 +325,7 @@ class AIService {
   }
 
   determineMessageType(message) {
-    const lower = message.toLowerCase();
+    const lower = (message || '').toLowerCase();
     if (lower.includes('market') || lower.includes('summary')) return 'market_data';
     if (lower.includes('analyze') || lower.includes('analysis')) return 'analysis';
     if (lower.includes('recommend')) return 'recommendation';
@@ -288,6 +333,8 @@ class AIService {
   }
 
   extractRecommendation(text) {
+    if (!text || typeof text !== 'string') return 'HOLD';
+    
     const lower = text.toLowerCase();
     if (lower.includes('strong buy') || lower.includes('buy')) return 'BUY';
     if (lower.includes('sell')) return 'SELL';
@@ -295,17 +342,25 @@ class AIService {
   }
 
   extractSymbol(message) {
+    if (!message || typeof message !== 'string') return null;
+    
     const match = message.match(/\b[A-Z]{2,5}\b/);
     return match ? match[0] : null;
   }
 
   extractKeyPoints(text) {
-    const lines = text.split('\n').filter(line => 
-      line.trim().startsWith('•') || 
-      line.trim().startsWith('-') ||
-      line.trim().match(/^\d+\./)
-    );
-    return lines.slice(0, 4).map(line => line.trim());
+    if (!text || typeof text !== 'string') return [];
+    
+    try {
+      const lines = text.split('\n').filter(line => 
+        line.trim().startsWith('•') || 
+        line.trim().startsWith('-') ||
+        line.trim().match(/^\d+\./)
+      );
+      return lines.slice(0, 4).map(line => line.trim());
+    } catch (error) {
+      return [];
+    }
   }
 }
 
