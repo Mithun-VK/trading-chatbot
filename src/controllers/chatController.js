@@ -5,6 +5,24 @@ const marketService = require('../services/marketService');
 const chatHistoryStore = new Map();
 
 class ChatController {
+  constructor() {
+    // Bind all methods to ensure 'this' works correctly in Express routes
+    this.sendMessage = this.sendMessage.bind(this);
+    this.getChatHistoryEndpoint = this.getChatHistoryEndpoint.bind(this);
+    this.clearChatHistory = this.clearChatHistory.bind(this);
+    this.getMarketData = this.getMarketData.bind(this);
+    this.addToWatchlist = this.addToWatchlist.bind(this);
+    this.getWatchlist = this.getWatchlist.bind(this);
+    this.removeFromWatchlist = this.removeFromWatchlist.bind(this);
+    this.getPortfolio = this.getPortfolio.bind(this);
+    this.updatePortfolio = this.updatePortfolio.bind(this);
+    this.getAnalysis = this.getAnalysis.bind(this);
+    this.getRecommendations = this.getRecommendations.bind(this);
+    this.healthCheck = this.healthCheck.bind(this);
+    
+    console.log('✅ Chat Controller initialized with in-memory storage');
+  }
+
   // Helper to manage in-memory chat history
   getChatHistory(userId, limit = 10) {
     if (!chatHistoryStore.has(userId)) {
@@ -30,7 +48,7 @@ class ChatController {
       timestamp: new Date()
     });
     
-    // Keep only last 50 messages per user
+    // Keep only last 100 messages (50 exchanges) per user
     if (history.length > 100) {
       chatHistoryStore.set(userId, history.slice(-100));
     }
@@ -76,7 +94,7 @@ class ChatController {
       try {
         marketContext = await marketService.getRelevantMarketData(message);
         if (marketContext) {
-          console.log(`📊 Market context retrieved for symbols:`, marketContext.symbols);
+          console.log(`📊 Market context retrieved`);
         }
       } catch (error) {
         console.error('⚠️ Market service error:', error.message);
@@ -165,11 +183,12 @@ class ChatController {
         });
       }
 
+      const hadHistory = chatHistoryStore.has(userId);
       chatHistoryStore.delete(userId);
 
       res.json({
         success: true,
-        message: 'Chat history cleared successfully',
+        message: hadHistory ? 'Chat history cleared successfully' : 'No history found for this user',
         timestamp: new Date().toISOString()
       });
 
@@ -346,9 +365,34 @@ class ChatController {
         watchlist: 'not available',
         portfolio: 'not available'
       },
-      inMemoryUsers: chatHistoryStore.size,
+      storage: {
+        type: 'in-memory',
+        activeUsers: chatHistoryStore.size,
+        note: 'Data resets on server restart'
+      },
       timestamp: new Date().toISOString()
     });
+  }
+
+  // Admin endpoint to clear all chat history (useful for testing)
+  async clearAllHistory(req, res) {
+    try {
+      const userCount = chatHistoryStore.size;
+      chatHistoryStore.clear();
+
+      res.json({
+        success: true,
+        message: `Cleared chat history for ${userCount} users`,
+        timestamp: new Date().toISOString()
+      });
+
+    } catch (error) {
+      console.error('Clear all history error:', error);
+      res.status(500).json({
+        success: false,
+        error: 'Failed to clear all chat history'
+      });
+    }
   }
 }
 
