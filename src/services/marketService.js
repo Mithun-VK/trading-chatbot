@@ -1,4 +1,21 @@
-const yahooFinance = require('yahoo-finance2').default;
+// marketService.js - FIXED VERSION
+let yahooFinance;
+
+// Async initialization for ES Module compatibility
+async function initYahooFinance() {
+  if (!yahooFinance) {
+    try {
+      // Use dynamic import for ES Module
+      const module = await import('yahoo-finance2');
+      yahooFinance = module.default;
+      console.log('✅ Yahoo Finance loaded via dynamic import');
+    } catch (error) {
+      console.error('❌ Failed to load yahoo-finance2:', error.message);
+      throw error;
+    }
+  }
+  return yahooFinance;
+}
 
 class MarketService {
   constructor() {
