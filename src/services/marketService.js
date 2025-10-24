@@ -1,4 +1,4 @@
-// marketService.js - FINAL WORKING VERSION
+// marketService.js - PRODUCTION ENHANCED VERSION
 let yahooFinance = null;
 let initPromise = null;
 
@@ -11,10 +11,13 @@ async function initYahooFinance() {
       console.log('🔄 Loading yahoo-finance2 module...');
       const module = await import('yahoo-finance2');
       
-      // module.default is a class/constructor - we need to instantiate it
       if (typeof module.default === 'function') {
         console.log('📦 Creating yahooFinance instance...');
-        yahooFinance = new module.default();
+        // Instantiate with options to suppress notices
+        yahooFinance = new module.default({ 
+          suppressNotices: ['yahooSurvey'],
+          cookieJar: true // Enable cookie handling for better reliability
+        });
         console.log('✅ Yahoo Finance instance created successfully');
       } else {
         yahooFinance = module.default;
@@ -36,7 +39,7 @@ async function initYahooFinance() {
 class MarketService {
   constructor() {
     this.cache = new Map();
-    this.cacheTimeout = 60 * 1000;
+    this.cacheTimeout = 60 * 1000; // 1 minute cache
     
     this.rateLimit = {
       requests: 0,
@@ -49,7 +52,8 @@ class MarketService {
       successfulRequests: 0,
       failedRequests: 0,
       cacheHits: 0,
-      cacheMisses: 0
+      cacheMisses: 0,
+      lastResetTime: new Date().toISOString()
     };
     
     this.ready = initYahooFinance();
@@ -104,6 +108,11 @@ class MarketService {
       timestamp: Date.now()
     });
     
+    // Auto-cleanup old cache entries
+    if (this.cache.size > 100) {
+      this.cleanupCache();
+    }
+    
     return data;
   }
 
@@ -123,7 +132,7 @@ class MarketService {
                    'regularMarketOpen', 'regularMarketPreviousClose', 'marketCap', 
                    'fiftyTwoWeekHigh', 'fiftyTwoWeekLow', 'averageVolume', 'bid', 'ask',
                    'bidSize', 'askSize', 'trailingPE', 'forwardPE', 'dividendYield',
-                   'shortName', 'longName', 'currency', 'exchange']
+                   'shortName', 'longName', 'currency', 'exchange', 'quoteType']
         });
 
         console.log(`✅ Successfully fetched quote for ${symbol}: $${quote.regularMarketPrice}`);
@@ -153,6 +162,7 @@ class MarketService {
           dividendYield: quote.dividendYield || null,
           currency: quote.currency || 'USD',
           exchange: quote.exchange || 'N/A',
+          quoteType: quote.quoteType || 'EQUITY',
           timestamp: new Date().toISOString(),
           source: 'yahoo-finance'
         };
@@ -248,6 +258,66 @@ class MarketService {
     }
   }
 
+  async getTrendingSymbols(region = 'US', count = 10) {
+    try {
+      const yf = await this.ensureReady();
+      await this.checkRateLimit();
+      
+      return await this.getCachedData(`trending_${region}`, async () => {
+        console.log(`🔥 Fetching trending symbols for ${region}...`);
+        const trending = await yf.trendingSymbols(region, { count });
+        return trending.quotes || [];
+      });
+
+    } catch (error) {
+      console.error('❌ Error fetching trending symbols:', error.message);
+      return [];
+    }
+  }
+
+  async getMarketSummary() {
+    try {
+      const majorIndices = ['^GSPC', '^DJI', '^IXIC', '^RUT', '^VIX'];
+      
+      console.log('📊 Fetching market summary...');
+      const indices = await this.getMultipleQuotes(majorIndices);
+      const trending = await this.getTrendingSymbols('US', 5);
+      
+      return {
+        indices: indices.map(index => ({
+          symbol: index.symbol,
+          name: this.getIndexName(index.symbol),
+          price: index.regularMarketPrice || index.price,
+          change: index.regularMarketChange || index.change,
+          changePercent: index.regularMarketChangePercent || index.changePercent
+        })),
+        trending: trending,
+        marketSentiment: this.calculateMarketSentiment(indices),
+        timestamp: new Date().toISOString()
+      };
+
+    } catch (error) {
+      console.error('❌ Market summary error:', error.message);
+      throw error;
+    }
+  }
+
+  async searchStocks(query, quotesCount = 10) {
+    try {
+      const yf = await this.ensureReady();
+      await this.checkRateLimit();
+      
+      console.log(`🔎 Searching for: ${query}`);
+      const searchResults = await yf.search(query, { quotesCount });
+      
+      return searchResults.quotes || [];
+
+    } catch (error) {
+      console.error(`❌ Search error for "${query}":`, error.message);
+      return [];
+    }
+  }
+
   async getRelevantMarketData(message) {
     const symbols = this.extractSymbolsFromMessage(message);
     
@@ -288,7 +358,8 @@ class MarketService {
   getIndexName(symbol) {
     const indexNames = {
       '^GSPC': 'S&P 500', '^DJI': 'Dow Jones', '^IXIC': 'NASDAQ',
-      '^RUT': 'Russell 2000', '^VIX': 'VIX'
+      '^RUT': 'Russell 2000', '^VIX': 'VIX', '^FTSE': 'FTSE 100',
+      '^N225': 'Nikkei 225', '^HSI': 'Hang Seng'
     };
     return indexNames[symbol] || symbol;
   }
@@ -302,7 +373,9 @@ class MarketService {
       'OUR', 'HAD', 'GET', 'MAY', 'HIM', 'OLD', 'SEE', 'NOW', 'WAY', 'WHO', 'BOY', 'ITS',
       'LET', 'PUT', 'SAY', 'SHE', 'TOO', 'USE', 'API', 'WITH', 'STOCK', 'PRICE', 'OF',
       'IS', 'IN', 'AT', 'TO', 'FROM', 'BY', 'ON', 'AS', 'OR', 'AN', 'BE', 'SO', 'UP',
-      'OUT', 'IF', 'NO', 'GO', 'DO', 'MY', 'IT', 'WE', 'ME', 'HE', 'US', 'AM', 'PM'
+      'OUT', 'IF', 'NO', 'GO', 'DO', 'MY', 'IT', 'WE', 'ME', 'HE', 'US', 'AM', 'PM',
+      'AI', 'VS', 'VIA', 'PER', 'ETC', 'SHOW', 'TELL', 'GIVE', 'FIND', 'WHAT', 'WHEN',
+      'WHERE', 'WHY', 'HOW', 'HAS', 'BEEN', 'WILL', 'ABOUT', 'THAN', 'THEN', 'THEM'
     ]);
     
     const validSymbols = possibleSymbols
@@ -332,6 +405,23 @@ class MarketService {
     return 'neutral';
   }
 
+  cleanupCache() {
+    const now = Date.now();
+    const entriesToDelete = [];
+    
+    for (const [key, value] of this.cache.entries()) {
+      if (now - value.timestamp > this.cacheTimeout * 5) { // Remove entries older than 5x timeout
+        entriesToDelete.push(key);
+      }
+    }
+    
+    entriesToDelete.forEach(key => this.cache.delete(key));
+    
+    if (entriesToDelete.length > 0) {
+      console.log(`🗑️ Cleaned up ${entriesToDelete.length} expired cache entries`);
+    }
+  }
+
   clearCache() {
     const size = this.cache.size;
     this.cache.clear();
@@ -339,9 +429,14 @@ class MarketService {
   }
 
   getCacheStats() {
+    const totalRequests = this.stats.cacheHits + this.stats.cacheMisses;
     return {
       size: this.cache.size,
-      entries: Array.from(this.cache.keys())
+      entries: Array.from(this.cache.keys()),
+      timeout: `${this.cacheTimeout / 1000} seconds`,
+      hitRate: totalRequests > 0 
+        ? `${((this.stats.cacheHits / totalRequests) * 100).toFixed(2)}%`
+        : '0%'
     };
   }
 
@@ -350,8 +445,24 @@ class MarketService {
       ...this.stats,
       successRate: this.stats.totalRequests > 0
         ? `${((this.stats.successfulRequests / this.stats.totalRequests) * 100).toFixed(2)}%`
-        : '0%'
+        : '0%',
+      cacheHitRate: (this.stats.cacheHits + this.stats.cacheMisses) > 0
+        ? `${((this.stats.cacheHits / (this.stats.cacheHits + this.stats.cacheMisses)) * 100).toFixed(2)}%`
+        : '0%',
+      uptime: process.uptime()
     };
+  }
+
+  resetStats() {
+    this.stats = {
+      totalRequests: 0,
+      successfulRequests: 0,
+      failedRequests: 0,
+      cacheHits: 0,
+      cacheMisses: 0,
+      lastResetTime: new Date().toISOString()
+    };
+    console.log('📊 Statistics reset');
   }
 
   async healthCheck() {
@@ -362,8 +473,11 @@ class MarketService {
       return {
         status: 'healthy',
         service: 'Yahoo Finance',
+        moduleLoaded: !!yf,
         testSymbol: 'AAPL',
         testPrice: testQuote.regularMarketPrice,
+        stats: this.getStats(),
+        cache: this.getCacheStats(),
         timestamp: new Date().toISOString()
       };
     } catch (error) {
