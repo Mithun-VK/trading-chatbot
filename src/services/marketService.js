@@ -1,4 +1,4 @@
-// marketService.js - DIAGNOSTIC & FIXED VERSION
+// marketService.js - FINAL WORKING VERSION
 let yahooFinance = null;
 let initPromise = null;
 
@@ -11,30 +11,37 @@ async function initYahooFinance() {
       console.log('🔄 Loading yahoo-finance2 module...');
       const module = await import('yahoo-finance2');
       
-      // Debug: Log the entire module structure
+      // Debug logging
       console.log('📦 Module keys:', Object.keys(module));
-      console.log('📦 Module.default exists:', !!module.default);
-      console.log('📦 Module.quote exists:', typeof module.quote);
-      console.log('📦 Module.default?.quote exists:', typeof module.default?.quote);
+      console.log('📦 Module.default type:', typeof module.default);
       
-      // Try all possible import patterns
-      if (typeof module.quote === 'function') {
-        // Pattern 1: Named exports directly on module
-        yahooFinance = module;
-        console.log('✅ Using direct module exports');
-      } else if (module.default && typeof module.default.quote === 'function') {
-        // Pattern 2: Default export with methods
-        yahooFinance = module.default;
-        console.log('✅ Using module.default exports');
-      } else if (module.default && typeof module.default.default === 'object') {
-        // Pattern 3: Nested default
-        yahooFinance = module.default.default;
-        console.log('✅ Using module.default.default exports');
-      } else {
-        throw new Error('Could not find yahoo-finance2 methods in any expected location');
+      // Check if module.default is the yahooFinance object
+      if (module.default) {
+        console.log('📦 Module.default keys:', Object.keys(module.default).slice(0, 20));
+        
+        // Check for quote function in various locations
+        if (typeof module.default.quote === 'function') {
+          yahooFinance = module.default;
+          console.log('✅ Using module.default (has quote method)');
+        } else if (typeof module.default.default === 'object') {
+          console.log('📦 Module.default.default keys:', Object.keys(module.default.default).slice(0, 20));
+          if (typeof module.default.default.quote === 'function') {
+            yahooFinance = module.default.default;
+            console.log('✅ Using module.default.default (has quote method)');
+          }
+        } else {
+          // If module.default is a function or constructor, try calling it
+          console.log('📦 Attempting to use module.default directly...');
+          yahooFinance = module.default;
+        }
+      }
+      
+      if (!yahooFinance) {
+        throw new Error('Could not find yahoo-finance2 methods in module structure');
       }
       
       console.log('✅ Yahoo Finance loaded successfully');
+      console.log('📊 yahooFinance type:', typeof yahooFinance);
       console.log('📊 Available methods:', Object.keys(yahooFinance).filter(k => typeof yahooFinance[k] === 'function').slice(0, 10).join(', '));
       
       return yahooFinance;
@@ -48,25 +55,20 @@ async function initYahooFinance() {
   return initPromise;
 }
 
-
 class MarketService {
   constructor() {
-    // Enhanced cache configuration
     this.cache = new Map();
-    this.cacheTimeout = 60 * 1000; // 1 minute for real-time data
+    this.cacheTimeout = 60 * 1000;
     
-    // Rate limiting configuration
     this.rateLimit = {
       requests: 0,
       resetTime: Date.now() + 60000,
       maxRequests: 30
     };
     
-    // Request queue for managing concurrent requests
     this.requestQueue = [];
     this.isProcessingQueue = false;
     
-    // Statistics tracking
     this.stats = {
       totalRequests: 0,
       successfulRequests: 0,
@@ -75,24 +77,37 @@ class MarketService {
       cacheMisses: 0
     };
     
-    // Initialize module
     this.ready = initYahooFinance();
     
     console.log('✅ MarketService initialized');
   }
 
-  // Ensure Yahoo Finance is ready before any operation
   async ensureReady() {
     if (!yahooFinance) {
       await this.ready;
     }
     if (!yahooFinance) {
-      throw new Error('Yahoo Finance module failed to initialize. Please check your installation.');
+      throw new Error('Yahoo Finance module failed to initialize');
     }
+    
+    // Validate quote method exists
+    if (typeof yahooFinance.quote !== 'function') {
+      console.error('❌ yahooFinance.quote is not a function!');
+      console.error('📦 yahooFinance type:', typeof yahooFinance);
+      console.error('📦 yahooFinance keys:', Object.keys(yahooFinance).slice(0, 20));
+      
+      // Last resort: check if it's a class/constructor
+      if (typeof yahooFinance === 'function') {
+        console.log('📦 yahooFinance appears to be a function/constructor');
+        console.log('📦 Prototype methods:', Object.getOwnPropertyNames(yahooFinance.prototype || {}).join(', '));
+      }
+      
+      throw new Error('yahoo-finance2 module loaded but quote method not found');
+    }
+    
     return yahooFinance;
   }
 
-  // Check rate limit before making requests
   async checkRateLimit() {
     const now = Date.now();
     
@@ -112,7 +127,6 @@ class MarketService {
     this.rateLimit.requests++;
   }
 
-  // Get cached data or fetch new data
   async getCachedData(key, fetchFunction) {
     const cached = this.cache.get(key);
     
@@ -134,7 +148,6 @@ class MarketService {
     return data;
   }
 
-  // Get real-time stock quote
   async getStockData(symbol) {
     this.stats.totalRequests++;
     
@@ -193,7 +206,6 @@ class MarketService {
     }
   }
 
-  // Get detailed stock data with historical information
   async getDetailedStockData(symbol, options = {}) {
     try {
       const yf = await this.ensureReady();
@@ -204,24 +216,13 @@ class MarketService {
       return await this.getCachedData(cacheKey, async () => {
         console.log(`🔍 Fetching detailed data for: ${symbol}`);
         
-        // Get quote summary with multiple modules
         const quoteSummary = await yf.quoteSummary(symbol.toUpperCase(), {
-          modules: [
-            'price',
-            'summaryDetail',
-            'defaultKeyStatistics',
-            'financialData',
-            'calendarEvents',
-            'recommendationTrend',
-            'earnings',
-            'earningsTrend'
-          ]
+          modules: ['price', 'summaryDetail', 'defaultKeyStatistics', 'financialData']
         }).catch(err => {
           console.warn(`⚠️ Could not fetch quote summary for ${symbol}:`, err.message);
           return null;
         });
 
-        // Get historical data
         const period = options.period || '1mo';
         const interval = options.interval || '1d';
         
@@ -234,44 +235,28 @@ class MarketService {
           return [];
         });
 
-        // Get intraday chart data
-        const chart = await yf.chart(symbol.toUpperCase(), {
-          period1: new Date(Date.now() - 24 * 60 * 60 * 1000),
-          interval: '5m'
-        }).catch(() => null);
-
         return {
           symbol: symbol.toUpperCase(),
           quote: quoteSummary?.price || null,
           summaryDetail: quoteSummary?.summaryDetail || null,
           statistics: quoteSummary?.defaultKeyStatistics || null,
           financialData: quoteSummary?.financialData || null,
-          earnings: quoteSummary?.earnings || null,
-          recommendations: quoteSummary?.recommendationTrend || null,
           historical: historical || [],
-          intraday: chart ? chart.quotes : [],
           timestamp: new Date().toISOString()
         };
       });
 
     } catch (error) {
       console.error(`❌ Error fetching detailed data for ${symbol}:`, error.message);
-      // Fallback to basic quote
       return await this.getStockData(symbol);
     }
   }
 
-  // Get multiple quotes at once (batch processing)
   async getMultipleQuotes(symbols) {
     try {
       const yf = await this.ensureReady();
       
-      // Filter and validate symbols
-      const validSymbols = symbols.filter(s => {
-        if (!s || typeof s !== 'string') return false;
-        if (s.length < 1 || s.length > 5) return false;
-        return true;
-      });
+      const validSymbols = symbols.filter(s => s && typeof s === 'string' && s.length > 0 && s.length <= 5);
       
       if (validSymbols.length === 0) {
         console.warn('⚠️ No valid symbols to fetch');
@@ -291,7 +276,6 @@ class MarketService {
 
     } catch (error) {
       console.error('❌ Error fetching multiple quotes:', error.message);
-      // Fallback to individual requests
       const results = [];
       for (const symbol of symbols) {
         try {
@@ -305,53 +289,6 @@ class MarketService {
     }
   }
 
-  // Get trending symbols
-  async getTrendingSymbols(count = 10, region = 'US') {
-    try {
-      const yf = await this.ensureReady();
-      await this.checkRateLimit();
-      
-      return await this.getCachedData(`trending_${region}`, async () => {
-        console.log(`🔥 Fetching trending symbols for ${region}...`);
-        const trending = await yf.trendingSymbols(region, { count });
-        return trending.quotes || [];
-      });
-
-    } catch (error) {
-      console.error('❌ Error fetching trending symbols:', error.message);
-      return [];
-    }
-  }
-
-  // Get market summary with major indices
-  async getMarketSummary() {
-    try {
-      const majorIndices = ['^GSPC', '^DJI', '^IXIC', '^RUT', '^VIX'];
-      
-      console.log('📊 Fetching market summary...');
-      const indices = await this.getMultipleQuotes(majorIndices);
-      const trending = await this.getTrendingSymbols(5);
-      
-      return {
-        indices: indices.map(index => ({
-          symbol: index.symbol,
-          name: this.getIndexName(index.symbol),
-          price: index.regularMarketPrice || index.price,
-          change: index.regularMarketChange || index.change,
-          changePercent: index.regularMarketChangePercent || index.changePercent
-        })),
-        trending: trending,
-        marketSentiment: this.calculateMarketSentiment(indices),
-        timestamp: new Date().toISOString()
-      };
-
-    } catch (error) {
-      console.error('❌ Market summary error:', error.message);
-      throw error;
-    }
-  }
-
-  // Get relevant market data based on message content
   async getRelevantMarketData(message) {
     const symbols = this.extractSymbolsFromMessage(message);
     
@@ -376,24 +313,6 @@ class MarketService {
     }
   }
 
-  // Search for stocks
-  async searchStocks(query) {
-    try {
-      const yf = await this.ensureReady();
-      await this.checkRateLimit();
-      
-      console.log(`🔎 Searching for: ${query}`);
-      const searchResults = await yf.search(query);
-      
-      return searchResults.quotes || [];
-
-    } catch (error) {
-      console.error(`❌ Search error for "${query}":`, error.message);
-      return [];
-    }
-  }
-
-  // Calculate period start date
   calculatePeriodStart(period) {
     const now = new Date();
     const periodMap = {
@@ -407,17 +326,14 @@ class MarketService {
     return new Date(Date.now() - days * 24 * 60 * 60 * 1000);
   }
 
-  // Get index name from symbol
   getIndexName(symbol) {
     const indexNames = {
       '^GSPC': 'S&P 500', '^DJI': 'Dow Jones', '^IXIC': 'NASDAQ',
-      '^RUT': 'Russell 2000', '^VIX': 'VIX', '^FTSE': 'FTSE 100',
-      '^N225': 'Nikkei 225', '^HSI': 'Hang Seng'
+      '^RUT': 'Russell 2000', '^VIX': 'VIX'
     };
     return indexNames[symbol] || symbol;
   }
 
-  // Extract stock symbols from message
   extractSymbolsFromMessage(message) {
     const symbolPattern = /\$?[A-Z]{1,5}\b/g;
     const possibleSymbols = message.toUpperCase().match(symbolPattern) || [];
@@ -427,10 +343,7 @@ class MarketService {
       'OUR', 'HAD', 'GET', 'MAY', 'HIM', 'OLD', 'SEE', 'NOW', 'WAY', 'WHO', 'BOY', 'ITS',
       'LET', 'PUT', 'SAY', 'SHE', 'TOO', 'USE', 'API', 'WITH', 'STOCK', 'PRICE', 'OF',
       'IS', 'IN', 'AT', 'TO', 'FROM', 'BY', 'ON', 'AS', 'OR', 'AN', 'BE', 'SO', 'UP',
-      'OUT', 'IF', 'NO', 'GO', 'DO', 'MY', 'IT', 'WE', 'ME', 'HE', 'US', 'AM', 'PM',
-      'AI', 'VS', 'VIA', 'PER', 'ETC', 'SHOW', 'TELL', 'GIVE', 'FIND', 'WHAT', 'WHEN',
-      'WHERE', 'WHY', 'HOW', 'MUCH', 'MANY', 'SOME', 'MORE', 'LESS', 'THAN', 'THEN',
-      'THEM', 'THESE', 'THOSE', 'THIS', 'THAT', 'HAS', 'BEEN', 'WILL', 'ABOUT'
+      'OUT', 'IF', 'NO', 'GO', 'DO', 'MY', 'IT', 'WE', 'ME', 'HE', 'US', 'AM', 'PM'
     ]);
     
     const validSymbols = possibleSymbols
@@ -445,7 +358,6 @@ class MarketService {
     return [...new Set(validSymbols)].slice(0, 5);
   }
 
-  // Calculate market sentiment from data
   calculateMarketSentiment(marketData) {
     if (!marketData || marketData.length === 0) return 'neutral';
 
@@ -461,60 +373,43 @@ class MarketService {
     return 'neutral';
   }
 
-  // Clear all cache
   clearCache() {
     const size = this.cache.size;
     this.cache.clear();
     console.log(`🗑️ Cache cleared (${size} entries removed)`);
   }
 
-  // Get cache statistics
   getCacheStats() {
     return {
       size: this.cache.size,
-      entries: Array.from(this.cache.keys()),
-      timeout: `${this.cacheTimeout / 1000} seconds`,
-      cacheHitRate: this.stats.cacheHits > 0 
-        ? `${((this.stats.cacheHits / (this.stats.cacheHits + this.stats.cacheMisses)) * 100).toFixed(2)}%`
-        : '0%'
+      entries: Array.from(this.cache.keys())
     };
   }
 
-  // Get service statistics
   getStats() {
     return {
       ...this.stats,
       successRate: this.stats.totalRequests > 0
         ? `${((this.stats.successfulRequests / this.stats.totalRequests) * 100).toFixed(2)}%`
-        : '0%',
-      cacheHitRate: (this.stats.cacheHits + this.stats.cacheMisses) > 0
-        ? `${((this.stats.cacheHits / (this.stats.cacheHits + this.stats.cacheMisses)) * 100).toFixed(2)}%`
-        : '0%',
-      uptime: process.uptime()
+        : '0%'
     };
   }
 
-  // Health check
   async healthCheck() {
     try {
       const yf = await this.ensureReady();
-      
-      // Test with a simple quote request
       const testQuote = await yf.quote('AAPL');
       
       return {
         status: 'healthy',
         service: 'Yahoo Finance',
-        moduleLoaded: !!yf,
         testSymbol: 'AAPL',
         testPrice: testQuote.regularMarketPrice,
-        stats: this.getStats(),
         timestamp: new Date().toISOString()
       };
     } catch (error) {
       return {
         status: 'unhealthy',
-        service: 'Yahoo Finance',
         error: error.message,
         timestamp: new Date().toISOString()
       };
