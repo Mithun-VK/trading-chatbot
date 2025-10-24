@@ -8,7 +8,7 @@ class AIService {
         
         // Use the correct, stable Gemini model
         this.model = this.genAI.getGenerativeModel({ 
-          model: 'gemini-1.5-flash', // CORRECTED: Use stable model instead of experimental
+          model: 'gemini-2.0-flash', // CORRECTED: Use stable model instead of experimental
           generationConfig: {
             temperature: 0.7,
             topK: 40,
