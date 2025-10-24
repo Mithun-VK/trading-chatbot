@@ -11,43 +11,21 @@ async function initYahooFinance() {
       console.log('🔄 Loading yahoo-finance2 module...');
       const module = await import('yahoo-finance2');
       
-      // Debug logging
-      console.log('📦 Module keys:', Object.keys(module));
-      console.log('📦 Module.default type:', typeof module.default);
-      
-      // Check if module.default is the yahooFinance object
-      if (module.default) {
-        console.log('📦 Module.default keys:', Object.keys(module.default).slice(0, 20));
-        
-        // Check for quote function in various locations
-        if (typeof module.default.quote === 'function') {
-          yahooFinance = module.default;
-          console.log('✅ Using module.default (has quote method)');
-        } else if (typeof module.default.default === 'object') {
-          console.log('📦 Module.default.default keys:', Object.keys(module.default.default).slice(0, 20));
-          if (typeof module.default.default.quote === 'function') {
-            yahooFinance = module.default.default;
-            console.log('✅ Using module.default.default (has quote method)');
-          }
-        } else {
-          // If module.default is a function or constructor, try calling it
-          console.log('📦 Attempting to use module.default directly...');
-          yahooFinance = module.default;
-        }
+      // module.default is a class/constructor - we need to instantiate it
+      if (typeof module.default === 'function') {
+        console.log('📦 Creating yahooFinance instance...');
+        yahooFinance = new module.default();
+        console.log('✅ Yahoo Finance instance created successfully');
+      } else {
+        yahooFinance = module.default;
+        console.log('✅ Yahoo Finance loaded as object');
       }
       
-      if (!yahooFinance) {
-        throw new Error('Could not find yahoo-finance2 methods in module structure');
-      }
-      
-      console.log('✅ Yahoo Finance loaded successfully');
-      console.log('📊 yahooFinance type:', typeof yahooFinance);
-      console.log('📊 Available methods:', Object.keys(yahooFinance).filter(k => typeof yahooFinance[k] === 'function').slice(0, 10).join(', '));
+      console.log('📊 Available methods:', Object.keys(Object.getPrototypeOf(yahooFinance)).filter(k => typeof yahooFinance[k] === 'function').slice(0, 10).join(', '));
       
       return yahooFinance;
     } catch (error) {
       console.error('❌ Failed to load yahoo-finance2:', error.message);
-      console.error('💡 Stack:', error.stack);
       throw error;
     }
   })();
@@ -65,9 +43,6 @@ class MarketService {
       resetTime: Date.now() + 60000,
       maxRequests: 30
     };
-    
-    this.requestQueue = [];
-    this.isProcessingQueue = false;
     
     this.stats = {
       totalRequests: 0,
@@ -89,22 +64,6 @@ class MarketService {
     if (!yahooFinance) {
       throw new Error('Yahoo Finance module failed to initialize');
     }
-    
-    // Validate quote method exists
-    if (typeof yahooFinance.quote !== 'function') {
-      console.error('❌ yahooFinance.quote is not a function!');
-      console.error('📦 yahooFinance type:', typeof yahooFinance);
-      console.error('📦 yahooFinance keys:', Object.keys(yahooFinance).slice(0, 20));
-      
-      // Last resort: check if it's a class/constructor
-      if (typeof yahooFinance === 'function') {
-        console.log('📦 yahooFinance appears to be a function/constructor');
-        console.log('📦 Prototype methods:', Object.getOwnPropertyNames(yahooFinance.prototype || {}).join(', '));
-      }
-      
-      throw new Error('yahoo-finance2 module loaded but quote method not found');
-    }
-    
     return yahooFinance;
   }
 
