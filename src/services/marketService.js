@@ -1,4 +1,4 @@
-// marketService.js - FINAL WORKING VERSION
+// marketService.js - DIAGNOSTIC & FIXED VERSION
 let yahooFinance = null;
 let initPromise = null;
 
@@ -11,21 +11,43 @@ async function initYahooFinance() {
       console.log('🔄 Loading yahoo-finance2 module...');
       const module = await import('yahoo-finance2');
       
-      // yahoo-finance2 exports everything directly, not as default
-      yahooFinance = module;
+      // Debug: Log the entire module structure
+      console.log('📦 Module keys:', Object.keys(module));
+      console.log('📦 Module.default exists:', !!module.default);
+      console.log('📦 Module.quote exists:', typeof module.quote);
+      console.log('📦 Module.default?.quote exists:', typeof module.default?.quote);
+      
+      // Try all possible import patterns
+      if (typeof module.quote === 'function') {
+        // Pattern 1: Named exports directly on module
+        yahooFinance = module;
+        console.log('✅ Using direct module exports');
+      } else if (module.default && typeof module.default.quote === 'function') {
+        // Pattern 2: Default export with methods
+        yahooFinance = module.default;
+        console.log('✅ Using module.default exports');
+      } else if (module.default && typeof module.default.default === 'object') {
+        // Pattern 3: Nested default
+        yahooFinance = module.default.default;
+        console.log('✅ Using module.default.default exports');
+      } else {
+        throw new Error('Could not find yahoo-finance2 methods in any expected location');
+      }
       
       console.log('✅ Yahoo Finance loaded successfully');
-      console.log('📊 Module structure:', Object.keys(module).slice(0, 15).join(', '));
+      console.log('📊 Available methods:', Object.keys(yahooFinance).filter(k => typeof yahooFinance[k] === 'function').slice(0, 10).join(', '));
+      
       return yahooFinance;
     } catch (error) {
       console.error('❌ Failed to load yahoo-finance2:', error.message);
-      console.error('💡 Make sure to run: npm install yahoo-finance2');
+      console.error('💡 Stack:', error.stack);
       throw error;
     }
   })();
   
   return initPromise;
 }
+
 
 class MarketService {
   constructor() {
