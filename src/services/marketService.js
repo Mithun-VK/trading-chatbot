@@ -1,4 +1,4 @@
-// marketService.js - PRODUCTION READY VERSION
+// marketService.js - FINAL WORKING VERSION
 let yahooFinance = null;
 let initPromise = null;
 
@@ -10,9 +10,12 @@ async function initYahooFinance() {
     try {
       console.log('🔄 Loading yahoo-finance2 module...');
       const module = await import('yahoo-finance2');
-      yahooFinance = module.default;
+      
+      // yahoo-finance2 exports everything directly, not as default
+      yahooFinance = module;
+      
       console.log('✅ Yahoo Finance loaded successfully');
-      console.log('📊 Available methods:', Object.keys(yahooFinance).filter(k => typeof yahooFinance[k] === 'function').slice(0, 10).join(', '));
+      console.log('📊 Module structure:', Object.keys(module).slice(0, 15).join(', '));
       return yahooFinance;
     } catch (error) {
       console.error('❌ Failed to load yahoo-finance2:', error.message);
@@ -326,32 +329,6 @@ class MarketService {
     }
   }
 
-  // Get options chain data
-  async getOptionsData(symbol, expirationDate = null) {
-    try {
-      const yf = await this.ensureReady();
-      await this.checkRateLimit();
-      
-      console.log(`📋 Fetching options data for: ${symbol}`);
-      const options = await yf.options(symbol.toUpperCase(), 
-        expirationDate ? { date: new Date(expirationDate) } : {}
-      );
-      
-      return {
-        symbol: symbol.toUpperCase(),
-        expirationDates: options.expirationDates || [],
-        strikes: options.strikes || [],
-        calls: options.options[0]?.calls || [],
-        puts: options.options[0]?.puts || [],
-        quote: options.quote
-      };
-
-    } catch (error) {
-      console.error(`❌ Error fetching options for ${symbol}:`, error.message);
-      return null;
-    }
-  }
-
   // Get relevant market data based on message content
   async getRelevantMarketData(message) {
     const symbols = this.extractSymbolsFromMessage(message);
@@ -394,42 +371,6 @@ class MarketService {
     }
   }
 
-  // Get analyst recommendations for a symbol
-  async getRecommendations(symbol) {
-    try {
-      const yf = await this.ensureReady();
-      await this.checkRateLimit();
-      
-      console.log(`💡 Fetching recommendations for: ${symbol}`);
-      const recommendations = await yf.recommendationsBySymbol(symbol.toUpperCase());
-      
-      return recommendations;
-
-    } catch (error) {
-      console.error(`❌ Error fetching recommendations for ${symbol}:`, error.message);
-      return null;
-    }
-  }
-
-  // Get news for a symbol
-  async getNews(symbol, count = 10) {
-    try {
-      const yf = await this.ensureReady();
-      await this.checkRateLimit();
-      
-      console.log(`📰 Fetching news for: ${symbol}`);
-      const quoteSummary = await yf.quoteSummary(symbol.toUpperCase(), {
-        modules: ['news']
-      });
-      
-      return quoteSummary.news?.slice(0, count) || [];
-
-    } catch (error) {
-      console.error(`❌ Error fetching news for ${symbol}:`, error.message);
-      return [];
-    }
-  }
-
   // Calculate period start date
   calculatePeriodStart(period) {
     const now = new Date();
@@ -467,11 +408,11 @@ class MarketService {
       'OUT', 'IF', 'NO', 'GO', 'DO', 'MY', 'IT', 'WE', 'ME', 'HE', 'US', 'AM', 'PM',
       'AI', 'VS', 'VIA', 'PER', 'ETC', 'SHOW', 'TELL', 'GIVE', 'FIND', 'WHAT', 'WHEN',
       'WHERE', 'WHY', 'HOW', 'MUCH', 'MANY', 'SOME', 'MORE', 'LESS', 'THAN', 'THEN',
-      'THEM', 'THESE', 'THOSE', 'THIS', 'THAT', 'HAS', 'BEEN', 'WILL', 'CAN', 'ABOUT'
+      'THEM', 'THESE', 'THOSE', 'THIS', 'THAT', 'HAS', 'BEEN', 'WILL', 'ABOUT'
     ]);
     
     const validSymbols = possibleSymbols
-      .map(s => s.replace('$', '')) // Remove $ prefix if present
+      .map(s => s.replace('$', ''))
       .filter(symbol => {
         if (commonWords.has(symbol)) return false;
         if (symbol.length < 1 || symbol.length > 5) return false;
